@@ -60,6 +60,15 @@ class PisaOS(
     var debug: Boolean = false
 ) {
   if (debug) println("Checkpoint 1")
+  var sessionRoots = Seq[Path]()
+  val seesion_dir_str = working_directory.split(";")
+  for (seesion_dir <- seesion_dir_str.tail) {
+      sessionRoots = sessionRoots :+ Path.of(seesion_dir)
+  }
+  val parent_session: String = seesion_dir_str(0)
+  working_directory = path_to_file.replace("/"++path_to_file.split("/").last, "")
+  println(parent_session, sessionRoots, working_directory)
+  
   val currentTheoryName: String =
     path_to_file.split("/").last.replace(".thy", "")
   val currentProjectName: String = {
@@ -85,42 +94,44 @@ class PisaOS(
       //      working_directory.split("/").last
       "HOL"
     } else {
-      "This is not supported at the moment"
+      working_directory //"AutoCorres"
+      // "This is not supported at the moment"
     }
   }
   if (debug) println("Checkpoint 2")
   // Figure out the session roots information and import the correct libraries
-  val sessionRoots: Seq[Path] = {
-    if (path_to_file.contains("afp")) {
-      Seq(
-        Path.of(
-          working_directory.slice(-1, working_directory.indexOf("thys/") + 4)
-        )
-      )
-    } else if (
-      path_to_file.contains("Isabelle") && path_to_file.contains("/src/")
-    ) {
-      val src_index: Int = working_directory.indexOf("/src/") + 5
-      val session_root_path_string: String =
-        working_directory.slice(0, src_index) +
-          working_directory
-            .slice(src_index, working_directory.length)
-            .split("/")
-            .head
-      Seq(Path.of(session_root_path_string))
-    } else if (path_to_file.contains("miniF2F")) {
-      Seq()
-    } else {
-      Seq(Path.of("This is not supported at the moment"))
-    }
-  }
+  // val sessionRoots: Seq[Path] = {
+  //   if (path_to_file.contains("afp")) {
+  //     Seq(
+  //       Path.of(
+  //         working_directory.slice(-1, working_directory.indexOf("thys/") + 4)
+  //       )
+  //     )
+  //   } else if (
+  //     path_to_file.contains("Isabelle") && path_to_file.contains("/src/")
+  //   ) {
+  //     val src_index: Int = working_directory.indexOf("/src/") + 5
+  //     val session_root_path_string: String =
+  //       working_directory.slice(0, src_index) +
+  //         working_directory
+  //           .slice(src_index, working_directory.length)
+  //           .split("/")
+  //           .head
+  //     Seq(Path.of(session_root_path_string))
+  //   } else if (path_to_file.contains("miniF2F")) {
+  //     Seq()
+  //   } else {
+  //     Seq(Path.of(working_directory))
+  //     // Seq(Path.of("This is not supported at the moment"))
+  //   }
+  // }
   if (debug) println("Checkpoint 3")
   // Prepare setup config and the implicit Isabelle context
   val setup: Isabelle.Setup = Isabelle.Setup(
     isabelleHome = Path.of(path_to_isa_bin),
     sessionRoots = sessionRoots,
     userDir = None,
-    logic = currentProjectName,
+    logic = parent_session,
     workingDirectory = Path.of(working_directory),
     build = false
   )
@@ -173,6 +184,8 @@ class PisaOS(
     ToplevelState,
     (List[RuntimeError.T], Option[ToplevelState])
   ]("fn (int, tr, st) => Toplevel.command_errors int tr st")
+  val is_toplevel: MLFunction[ToplevelState, Boolean] =
+    compileFunction[ToplevelState, Boolean]("Toplevel.is_toplevel")
   val toplevel_end_theory: MLFunction[ToplevelState, Theory] =
     compileFunction[ToplevelState, Theory]("Toplevel.end_theory Position.none")
   val theory_of_state: MLFunction[ToplevelState, Theory] =
@@ -207,10 +220,88 @@ class PisaOS(
     compileFunction[ToplevelState, Boolean, List[Pretty.T]](
       "fn (tls, b) => Proof_Context.pretty_local_facts b (Toplevel.context_of tls)"
     )
+  val local_facts_string: MLFunction2[ToplevelState, Boolean, Unit] =
+    compileFunction[ToplevelState, Boolean, Unit](
+      "fn (tls, b) => Proof_Context.print_local_facts b (Toplevel.context_of tls)"
+    )
   val make_pretty_list_string_list: MLFunction[List[Pretty.T], List[String]] =
     compileFunction[List[Pretty.T], List[String]](
       "fn (pretty_list) => map Pretty.unformatted_string_of pretty_list"
     )
+
+  val make_pretty_string: MLFunction[Pretty.T, String] =
+    compileFunction[Pretty.T, String](
+      "fn (pretty) => Pretty.unformatted_string_of pretty"
+    )
+  
+  val print_elaberate_toplevel_state: MLFunction[ToplevelState, String] = 
+    compileFunction[ToplevelState, String](
+      """fn (state) => let 
+        |  
+        |  fun forall_intr_vars th = fold Thm.forall_intr 
+        |        (Thm.add_vars th Vars.empty |> Vars.dest |> map snd) th;
+        |  
+        |  fun forall_intr_vars_prop_of thm =
+        |    let
+        |      val pp = SOME (forall_intr_vars thm) handle _ => NONE
+        |    in
+        |      case pp of 
+        |        SOME tt => Thm.prop_of tt 
+        |      | NONE => Thm.prop_of thm
+        |    end;
+        |  
+        |  fun ascii_of_term ctxt trm = 
+        |    let 
+        |      val xml_body = Syntax.string_of_term ctxt trm |> YXML.parse_body;
+        |    in XML.content_of xml_body end;
+        |  
+        |  fun print_elaberate_state top_state =
+        |    let 
+        |      val ctxt = Toplevel.context_of top_state
+        |      val facts = 
+        |              ctxt |> Proof_Context.facts_of |> Facts.props |>
+        |               map #1 |> map forall_intr_vars_prop_of
+        |      val facts_str = facts |> map (ascii_of_term ctxt) |> Library.sort_strings
+        |                       |> (fn ss => fold (fn s => fn b =>s ^ " <;> " ^ b) ss "")
+        |      val goal = top_state |> Toplevel.proof_of |> Proof.goal |>
+        |                  #goal |> Thm.concl_of |> ascii_of_term ctxt
+        |    in "<facts>: "^facts_str ^ " <goal:> " ^ goal end 
+        |  in 
+        |    print_elaberate_state state
+        |  end""".stripMargin
+    )
+
+  def getElaborateStateString(top_level_state: ToplevelState): String = {
+    var facts: String = "Not in proof context."
+    if ((is_proof(top_level_state).force.retrieveNow)) {
+      facts = print_elaberate_toplevel_state(top_level_state).force.retrieveNow
+    }
+    facts
+  }
+
+  // val print_thm: MLFunction[String, String] = 
+  //   compileFunction[String, String](
+  //     """fn name => @{thm name}""".stripMargin
+  //   )
+
+  // def get_thm(name: String): String = {
+  //   print_thm(name).force.retrieveNow
+  // }
+
+  // val print_thms: MLFunction[ToplevelState, String] =
+  //   compileFunction[ToplevelState, String](
+  //     """fn tls => let
+  //       |  fun string_of_thms ctxt args =
+  //       |    Pretty.string_of (Proof_Context.pretty_fact ctxt ("", Attrib.eval_thms ctxt args));
+  //       |  
+  //       |  in
+  //       |    string_of_thms (Toplevel.context_of tls)
+  //       |  end""".stripMargin
+  //   )
+
+  // def get_thms(top_level_state: ToplevelState): String = {
+  //   print_thms(top_level_state).force.retrieveNow
+  // }
 
   val local_facts_and_defs: MLFunction[ToplevelState, List[(String, String)]] =
     compileFunction[ToplevelState, List[(String, String)]](
@@ -384,10 +475,11 @@ class PisaOS(
     locales_opened.filter(_.startsWith(currentTheoryName))
   }
 
-  def local_facts_and_defs_string(tls: ToplevelState): String =
+  def local_facts_and_defs_string(tls: ToplevelState): String ={
     local_facts_and_defs(tls).force.retrieveNow.distinct
       .map(x => x._1 + "<DEF>" + x._2)
       .mkString("<SEP>")
+    }
   def local_facts_and_defs_string(tls_name: String): String = {
     val tls = retrieve_tls(tls_name)
     try {
@@ -609,20 +701,39 @@ class PisaOS(
     reset_map()
   }
 
-  def getFacts(stateString: String): String = {
+  def getFacts(tls: ToplevelState): String = {
     var facts: String = ""
-    if (stateString.trim.nonEmpty) {
+
+    if (!(is_toplevel(tls).force.retrieveNow)) {
       // Limit the maximum number of local facts to be 5
       for (
         fact <- make_pretty_list_string_list(
-          pretty_local_facts(toplevel, false)
-        ).retrieveNow.takeRight(5)
+          pretty_local_facts(tls, false).retrieveNow
+        ).force.retrieveNow.takeRight(5)
       ) {
+        println("checkpoint 4")
         facts = facts + fact + "<\\PISASEP>"
       }
     }
     facts
   }
+
+  // def getFacts(stateString: String): String = {
+  //   var facts: String = ""
+    
+  //   if (stateString.trim.nonEmpty) {
+  //     // Limit the maximum number of local facts to be 5
+  //     for (
+  //       fact <- make_pretty_list_string_list(
+  //         pretty_local_facts(toplevel, false).retrieveNow
+  //       ).force.retrieveNow.takeRight(5)
+  //     ) {
+  //       println("checkpoint 4")
+  //       facts = facts + fact + "<\\PISASEP>"
+  //     }
+  //   }
+  //   facts
+  // }
 
   def getStateString(top_level_state: ToplevelState): String =
     toplevel_string_of_state(top_level_state).force.retrieveNow
@@ -728,7 +839,7 @@ class PisaOS(
           ) 
             continue.breakable {
               if (text.trim.isEmpty) continue.break
-              // println("Small step : " + text)
+              println("Small step : " + text)
               tls_to_return = if (timeout_in_millis > 10000) {
                 singleTransitionWith30sTimeout(transition, tls_to_return)
               } else singleTransitionWith10sTimeout(transition, tls_to_return)

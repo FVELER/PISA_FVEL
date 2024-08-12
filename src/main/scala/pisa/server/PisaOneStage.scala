@@ -224,7 +224,7 @@ class OneStageBody extends ZServer[ZEnv, Any] {
       pisaos.register_tls(name = new_name, tls = new_state)
       if (hammered) {
         s"$actual_step <hammer> ${pisaos.getStateString(new_state)}"
-      } else s"${pisaos.getStateString(new_state)}"
+      } else s"${pisaos.getElaborateStateString(new_state)}" //s"${pisaos.getStateString(new_state)}" pisaos.fact_definition?
     } else s"Didn't find top level state of given name: ${toplevel_state_name}"
   }
 
@@ -448,7 +448,20 @@ class OneStageBody extends ZServer[ZEnv, Any] {
       } else if (isa_command.command.startsWith("<get fact definition>")) {
         val tls_name: String = isa_command.command.split("<get fact definition>")(1).trim
         val fact_name: String = isa_command.command.split("<get fact definition>")(2).trim
-        deal_with_fact_definition(tls_name, fact_name)
+        try {
+          deal_with_fact_definition(tls_name, fact_name)
+        } catch {
+          case e: IsabelleMLException => {
+            println("Extract facts: " + fact_name)
+            println("IsabelleException: " + e.getMessage + "\n")
+            "Step error: " + e.getMessage
+          }
+          case f: Throwable => {
+            println("Extract facts: " + fact_name)
+            println("Unknown error: " + f.getMessage + "\n")
+            "Unknown error: " + f.getMessage
+          }
+        }
       } else if (isa_command.command.trim == "<parse entire thy>") {
         deal_with_parse_entire_thy
       } else if (isa_command.command.trim.startsWith("<accumulative_step_to_theorem_end>")) {
